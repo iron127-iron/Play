@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>代码雨特效 | 矩阵数字雨</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: black;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+            font-family: 'Courier New', 'Fira Code', monospace;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            background: black;
+        }
+
+        /* 可选: 添加一个简单的文字提示或水印 (不影响视觉效果) */
+        .info {
+            position: fixed;
+            bottom: 12px;
+            left: 12px;
+            color: #0f0;
+            font-family: monospace;
+            font-size: 12px;
+            opacity: 0.6;
+            background: rgba(0,0,0,0.5);
+            padding: 4px 10px;
+            border-radius: 20px;
+            pointer-events: none;
+            z-index: 100;
+            backdrop-filter: blur(2px);
+            letter-spacing: 1px;
+        }
+        
+        @media (max-width: 600px) {
+            .info {
+                font-size: 8px;
+                bottom: 6px;
+                left: 6px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <canvas id="matrixCanvas"></canvas>
+    <div class="info">CODE RAIN // MATRIX STYLE</div>
+
+    <script>
+        (function() {
+            // --- 获取画布元素 ---
+            const canvas = document.getElementById('matrixCanvas');
+            const ctx = canvas.getContext('2d');
+
+            // --- 雨滴配置参数 ---
+            let columns;                // 列数 (根据字体宽度和画布宽度动态计算)
+            let drops = [];             // 存储每一列当前雨滴位置 (y坐标索引)
+            let fontSize = 20;          // 基础字体大小(px)，实际会根据屏幕DPI微调，但保持视觉爽感
+            let columnWidth;            // 每个字符的宽度(px) 大约 fontSize * 0.6 (等宽字体)
+            let charSet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+{}:<>?~\"`';,./\\|[]-= "; 
+            // 为了让代码雨更有"黑客感"，包含数字、字母、符号，也可以加入日文片假名提升矩阵风格
+            const katakana = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン";
+            // 合并字符集: 经典ASCII + 日文片假名(营造矩阵感)
+            let fullCharSet = charSet + katakana;
+            // 最终用于显示的字符数组
+            let characters = fullCharSet.split('');
+            
+            // 颜色风格: 经典绿色 + 偶尔亮白/亮绿，营造霓虹感
+            const primaryColor = "#0f0";      // 主绿色
+            const brightColor = "#8f8";       // 亮绿/白绿色
+            const glowColor = "#0f08";         // 带透明度的光晕
+            
+            // 雨滴速度控制 (帧更新移动距离)
+            let baseSpeed = 0.5;      // 速度基数，每帧下落像素增量 (实际每帧基于y坐标移动，但为了平滑可用增量)
+            // 为了每帧表现不同速度，生成每列的随机速度因子 (范围0.6~1.8)
+            let columnSpeeds = [];
+            
+            // 雨滴密度控制 (每一列是否活跃，也可以设置所有列都下，但可以随机重置位置)
+            // 增加一些随机重置列顶部的逻辑，让雨滴断续更有层次
+            
+            // 帧率控制相关 (requestAnimationFrame 自然帧率)
+            let animationId = null;
+            
+            // 画板尺寸自适应
+            function resizeCanvas() {
+                // 获取设备像素比例? 不必，canvas直接设置宽高属性避免模糊
+                const w = window.innerWidth;
+                const h = window.innerHeight;
+                canvas.width = w;
+                canvas.height = h;
+                
+                // 根据画布宽度重新计算列数: 字体大小确定后，每个字符占宽约 fontSize * 0.6 (等宽字体)
+                // 但为了视觉效果更加密集/精美，可以重新计算列宽动态
+                // 同时为了避免太小或太大，设置最小字体14，最大28，根据宽度调整?
+                // 根据屏幕宽度动态调整字体大小 (保持列数在60~120左右更好看)
+                let newFontSize = Math.floor(Math.min(Math.max(w / 45, 14), 28));
+                // 如果窗口很宽，可以稍微加大字体; 高度方面也保证看的清
+                if (w > 1600) newFontSize = 24;
+                else if (w > 1200) newFontSize = 22;
+                else if (w > 800) newFontSize = 20;
+                else newFontSize = 18;
+                
+                // 但是字体大小不宜过于频繁突变，但因为resize事件重新初始化数组比较好
+                fontSize = newFontSize;
+                columnWidth = fontSize * 0.65;   // 等宽字体大约宽度比例0.6~0.65
+                // 重新计算列数
+                const newColumns = Math.floor(w / columnWidth) + 2; // 多一列余边
+                // 如果列数发生变化，需要重新初始化雨滴数组和速度数组
+                if (newColumns !== columns) {
+                    columns = newColumns;
+                    // 重新初始化下落位置数组: 每一列雨滴头部所在的行索引(基于字符高度)
+                    // 使用y轴坐标: 为了方便，采用基于行数(grid)的方式：每行的间隔 = fontSize (字符高度)
+                    // 传统代码雨通常基于字符单元格网格，y方向索引是整数，移动时每次增加1或随机速度增量。
+                    // 为模拟平滑的动态，我们维护每列当前"行偏移" (float, 表示在第几行位置，允许小数插值视觉平滑)
+                    // 但绘制时根据偏移*fontSize绘制字符序列，经典方式使用整数行，但为了流畅可混合。
+                    // 为了提高经典感和清晰度，采用离散的行索引方式（每一列的滴位置为一个整数索引，表示当前最高字符的行数）。
+                    // 每帧每个活跃列下落距离为 速度因子（1~2）行。我们维护一个浮点位置，绘制时取整，让移动时闪动感加剧。
+                    drops = [];
+                    columnSpeeds = [];
+                    for (let i = 0; i < columns; i++) {
+                        // 初始化每一列雨滴起始位置: 随机 -20 到 0 行范围, 使得同时开始不同位置。
+                        const initRow = -Math.random() * 40 - 5;   // 有些从顶部上方开始出现，渐进感
+                        drops.push(initRow);
+                        // 每列速度系数: 0.6 ~ 1.8之间，让雨滴有快有慢
+                        columnSpeeds.push(0.6 + Math.random() * 1.2);
+                    }
+                } else {
+                    // 列数未变，但字体大小可能变了，需要重新调整drops的坐标范围影响不大，但重新初始化可选保持动态，
+                    // 为了稳定性，只重置位置会导致突变，不重置更好，让雨继续。
+                    // 但是columnWidth更新，绘制会按照新的字符宽度绘制，但不会导致崩溃，只影响偏移。
+                }
+                
+                // 无论是否改变列数，由于画布大小变了，需要重绘第一帧
+                // 字体设置应用到canvas上下文
+                ctx.font = `${fontSize}px 'Courier New', 'Fira Code', monospace`;
+                // 确保文本基线设为top，便于坐标计算
+                ctx.textBaseline = "top";
+            }
+            
+            // 绘制单个字符及拖尾效果 (主要绘制每一列从当前滴位置向上到顶部的一段字符尾迹)
+            // 经典代码雨: 每一列显示若干字符，当前滴位置的字符最亮，上方字符逐渐变暗，形成拖尾效果。
+            function drawRain() {
+                if (!ctx) return;
+                // 采用半透明黑色矩形覆盖，制造拖尾渐隐效果 (经典方法)
+                ctx.fillStyle = "rgba(0, 0, 0, 0.08)";   // 透明度越低，拖尾越长; 0.08~0.1 合适
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                // 设置字体，以及阴影效果(霓虹微光)
+                ctx.font = `${fontSize}px 'Courier New', 'Fira Code', monospace`;
+                ctx.textBaseline = "top";
+                
+                // 获取当前画板高度(用于判断超出屏幕则重置)
+                const maxRows = Math.ceil(canvas.height / fontSize) + 5;   // 最大行数索引边界
+                
+                // 遍历每一列绘制字符瀑布
+                for (let col = 0; col < columns; col++) {
+                    // 获取当前列雨滴头部位置(浮点行索引)
+                    let headRowFloat = drops[col];
+                    // 整数部分表示当前头部所在行索引（向下取整，决定绘制哪个位置为最亮字符）
+                    const headRowInt = Math.floor(headRowFloat);
+                    // 速度因子
+                    const speed = columnSpeeds[col];
+                    
+                    // 更新位置: 每帧下落速度 * 速度因子 (使得每列快慢不同)
+                    // 为了随机变化，增加一点细微的随机变速(周期性变更，但不影响太多)
+                    let newRow = headRowFloat + baseSpeed * speed;
+                    // 边界判断：如果超出屏幕底部一定行数，重置头部到顶部随机负行，并可选随机速度微调
+                    if (newRow > maxRows) {
+                        // 重置该列: 随机从 -15 到 -3 行重新开始，让雨滴重新出现, 并且重置速度微微改变
+                        newRow = -Math.random() * 25 - 5;
+                        // 重置时给一个新的随机速度系数，让雨更加随机
+                        columnSpeeds[col] = 0.6 + Math.random() * 1.4;
+                    }
+                    drops[col] = newRow;
+                    
+                    // 再次确保绘制时 headRowInt 为当前头部，但可能newRow更新导致绘制错位没关系，直接用最新的drop
+                    const currentHeadRow = drops[col];
+                    const headY = currentHeadRow * fontSize;
+                    // 如果头部已经超出画布顶部太多且还没有重置，那也要重置？上面已经重置处理了底部，但若超出顶部太远忽略，只绘制可见区
+                    
+                    // 对于每一列，从当前头部往下绘制若干字符（拖尾长度通常在8~20之间）
+                    const tailLength = 12 + Math.floor(Math.random() * 10);  // 动态拖尾长度，使效果更生动
+                    
+                    // 为避免性能过度，遍历绘制行数。最大高度限制也是最大行数限制
+                    for (let step = 0; step < tailLength; step++) {
+                        // 当前绘制字符的行索引 (头部向下偏移step行)
+                        const rowIndex = currentHeadRow - step;
+                        if (rowIndex < 0) continue; // 超出顶部不绘制
+                        const yPos = rowIndex * fontSize;
+                        if (yPos > canvas.height + fontSize) break; // 超出底部不绘制
+                        
+                        // 随机从字符集中选取一个字符 (为了丰富，每个位置可以独立随机)
+                        const randomChar = characters[Math.floor(Math.random() * characters.length)];
+                        // 根据step距离头部的距离确定亮度/颜色: 头部最亮(亮白绿/绿)，越往下越暗，直到变暗消失
+                        let opacity, colorStyle;
+                        // 距离头部步数比例
+                        const intensity = 1 - (step / tailLength);  // 头部1，尾部0
+                        // 增强头部亮度
+                        if (step === 0) {
+                            // 头部字符 亮白色或亮绿，并带光晕
+                            colorStyle = brightColor;
+                            // 可选添加阴影
+                            ctx.shadowBlur = 8;
+                            ctx.shadowColor = "#0f0";
+                        } else {
+                            // 拖尾字符: 绿色渐变至半透明深绿
+                            const gValue = Math.floor(80 + 175 * intensity);
+                            colorStyle = `rgb(30, ${gValue}, 30)`;
+                            ctx.shadowBlur = step < 3 ? 4 : 0;
+                            ctx.shadowColor = "#0f0";
+                        }
+                        // 对特别靠后的字符降低透明度
+                        if (step > tailLength * 0.6) {
+                            const alpha = Math.max(0.2, 1 - (step / tailLength) * 1.2);
+                            colorStyle = step === 0 ? colorStyle : `rgba(0, ${Math.floor(80 + 100 * intensity)}, 0, ${alpha})`;
+                        }
+                        
+                        ctx.fillStyle = colorStyle;
+                        // 计算x坐标: 列索引*列宽 + 微小偏移(让每个字符在列内有细微错落感?最好保持对齐)
+                        const xPos = col * columnWidth;
+                        // 可选项: 增加随机闪烁? 偶尔跳过绘制产生闪烁?
+                        if (Math.random() < 0.03 && step > 2) {
+                            // 偶尔不绘制某个字符，模拟闪烁效果
+                            continue;
+                        }
+                        ctx.fillText(randomChar, xPos, yPos);
+                    }
+                    
+                    // 额外随机增加偶尔的“光晕”效果: 在头部附近额外绘制高亮字符叠加
+                    if (Math.random() < 0.15 && currentHeadRow > 0) {
+                        ctx.shadowBlur = 10;
+                        ctx.fillStyle = "#fff";
+                        const extraChar = characters[Math.floor(Math.random() * characters.length)];
+                        const headX = col * columnWidth;
+                        const headYPos = currentHeadRow * fontSize;
+                        ctx.fillText(extraChar, headX, headYPos);
+                        ctx.shadowBlur = 0;
+                    }
+                }
+                // 重置阴影
+                ctx.shadowBlur = 0;
+                ctx.shadowColor = "transparent";
+            }
+            
+            // 为了增加动态效果，可以偶尔改变全局基础速度，模拟时间感轻微浮动
+            let speedMod = 1.0;
+            function updateSpeedModulation() {
+                // 每隔几秒，速度基数的正弦变化，保持呼吸感，但变化缓慢
+                // 这里简单让速度在0.5~0.9之间缓慢波动，增加层次
+                const t = Date.now() / 8000;
+                baseSpeed = 0.55 + Math.sin(t) * 0.2;
+                requestAnimationFrame(() => {
+                    setTimeout(() => updateSpeedModulation(), 3000);
+                });
+            }
+            
+            // 可选: 每列在一定概率下重置随机速度，让雨滴更有活力
+            function dynamicSpeedJitter() {
+                if (columns && columnSpeeds) {
+                    for (let i = 0; i < columns; i++) {
+                        // 1% 概率每帧重置速度系数，非常细微
+                        if (Math.random() < 0.005) {
+                            columnSpeeds[i] = 0.7 + Math.random() * 1.3;
+                        }
+                        // 极端情况下如果某一列卡住太久 (超出范围通过重置机制)
+                    }
+                }
+                requestAnimationFrame(() => dynamicSpeedJitter);
+            }
+            
+            // 添加鼠标/触摸交互彩蛋: 鼠标移动时增加雨滴速度或产生新列涟漪? 可以制造"干扰波"
+            // 为了炫酷: 鼠标附近列速度加快，增加临场感
+            let mouseX = -100, mouseY = -100;
+            function onMouseMove(e) {
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+                let mx = (e.clientX - rect.left) * scaleX;
+                let my = (e.clientY - rect.top) * scaleY;
+                mouseX = mx;
+                mouseY = my;
+                // 可选：增加临时速度影响区域，但不覆盖全局逻辑。
+                if (columns && columnWidth) {
+                    const affectedCol = Math.floor(mouseX / columnWidth);
+                    if (affectedCol >= 0 && affectedCol < columns) {
+                        // 临时提升该列速度因子，持续短暂效果（在动画帧中会重置会原速度太快，设置临时速度映射表)
+                        // 为了简化，在draw循环中会基于临时的存储来修改速度因子，但为避免复杂，可以加一个额外数组 speedBoost
+                        if (!window.speedBoost) window.speedBoost = new Array(columns).fill(0);
+                        window.speedBoost[affectedCol] = 1.8;
+                        // 相邻列也轻微影响
+                        if (affectedCol + 1 < columns) window.speedBoost[affectedCol + 1] = 1.4;
+                        if (affectedCol - 1 >= 0) window.speedBoost[affectedCol - 1] = 1.4;
+                    }
+                }
+            }
+            
+            // 应用boost更新速度主逻辑
+            function applySpeedBoost() {
+                if (window.speedBoost && columnSpeeds) {
+                    for (let i = 0; i < columns; i++) {
+                        if (window.speedBoost[i] > 0) {
+                            // 叠加速度因子，但不是永久，每帧衰减
+                            columnSpeeds[i] = Math.min(2.5, columnSpeeds[i] * 0.9 + window.speedBoost[i] * 0.2);
+                            window.speedBoost[i] *= 0.85; // 衰减
+                            if (window.speedBoost[i] < 0.05) window.speedBoost[i] = 0;
+                        }
+                    }
+                }
+            }
+            
+            // 添加窗口失去焦点时降低性能? 不需要特别处理，保持美观。
+            let frameCount = 0;
+            function animate() {
+                // 先应用速度提升效果（鼠标交互）
+                applySpeedBoost();
+                // 绘制当前帧
+                drawRain();
+                // 下一帧
+                animationId = requestAnimationFrame(animate);
+                frameCount++;
+                // 降低长时间运行的微小内存积累，每1000帧重新随机微小调整字符集(可选)
+                if (frameCount % 600 === 0) {
+                    // 动态微调字符集顺序或者重新混洗字符列表增加新鲜感
+                    for (let i = characters.length - 1; i > 0; i--) {
+                        const j = Math.floor(Math.random() * (i + 1));
+                        [characters[i], characters[j]] = [characters[j], characters[i]];
+                    }
+                }
+            }
+            
+            // 防抖resize
+            let resizeTimeout;
+            function handleResize() {
+                clearTimeout(resizeTimeout);
+                resizeTimeout = setTimeout(() => {
+                    resizeCanvas();
+                    // 重置速度boost数组
+                    if (columns) {
+                        window.speedBoost = new Array(columns).fill(0);
+                    }
+                }, 100);
+            }
+            
+            // 初始化事件监听和启动动画
+            function init() {
+                resizeCanvas();
+                // 初始化速度影响数组
+                window.speedBoost = new Array(columns).fill(0);
+                // 启动动态调制
+                updateSpeedModulation();
+                // 启动速度随机微抖
+                dynamicSpeedJitter();
+                // 监听鼠标移动
+                window.addEventListener('mousemove', onMouseMove);
+                window.addEventListener('touchmove', (e) => {
+                    if (e.touches.length) {
+                        const rect = canvas.getBoundingClientRect();
+                        const touch = e.touches[0];
+                        const fakeEvent = { clientX: touch.clientX, clientY: touch.clientY };
+                        onMouseMove(fakeEvent);
+                    }
+                });
+                window.addEventListener('resize', handleResize);
+                // 开始动画循环
+                animate();
+            }
+            
+            // 启动矩阵雨
+            init();
+        })();
+    </script>
+</body>
+</html>
